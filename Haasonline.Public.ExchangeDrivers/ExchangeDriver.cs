@@ -70,7 +70,7 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
         public ExchangeDriver()
         {
             PingAddress = "api.bittrex.com";
-            PollingSpeed = 30;
+            PollingSpeed = 20;
             PlatformType = ScriptedExchangeType.Spot;
 
             HasTickerBatchCalls = false;
@@ -925,7 +925,7 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                 UnderlyingCurrency = PrimaryCurrency;
                 Fee = 0.25M;
                 PriceDecimals = 8;
-                MinimumTradeVolume = 0.0005M;
+                MinimumTradeVolume = 0.00001M;
 
                 string minTradeSize = "1";
                 MinimumTradeAmount = Decimal.Parse(minTradeSize, NumberStyles.Float, CultureInfo.InvariantCulture);
@@ -1196,8 +1196,11 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
         public static Trade ParsePublicTrade(IScriptMarket market, JObject o)
         {
+            Console.Out.WriteLine("Parsing public trade");
             if (o == null)
                 return null;
+
+            Console.Out.WriteLine(o);
 
             var dtDateTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             dtDateTime = dtDateTime.AddMilliseconds(o.Value<long>("TradeTimeMS")).ToLocalTime();
@@ -1210,6 +1213,8 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                 Amount = Decimal.Parse(o.Value<string>("Quantity"), NumberStyles.Float, CultureInfo.InvariantCulture),
                 IsBuyOrder = o.Value<string>("Side").ToLower().IndexOf("buy", StringComparison.Ordinal) > -1
             };
+
+            Console.Out.WriteLine("Done parsing public trade");
 
             return r;
         }
