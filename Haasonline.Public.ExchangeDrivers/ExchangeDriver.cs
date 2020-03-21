@@ -34,6 +34,8 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
         private List<IScriptOrder> _openOrders;
         private ApexUserInfo _userInfo;
         private List<ApexOrderHistory> _orders = new List<ApexOrderHistory>();
+        private Dictionary<int, List<IScriptOrder>> _trades = new Dictionary<int, List<IScriptOrder>>();
+        private Dictionary<int, bool> _instrumentSubscribed = new Dictionary<int, bool>();
 
         private long _lastNonce;
         private readonly string _apiUrl = "https://api.metalx.com";
@@ -97,6 +99,7 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
             Console.Out.WriteLine("Disconnect");
         }
 
+        #region Public API
         public List<IScriptMarket> GetMarkets()
         {
             Console.Out.WriteLine("GetMarkets");
@@ -193,7 +196,6 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
                 if (response != null)
                 {
-                  Console.Out.WriteLine(response);
                   orderbook = new Orderbook(response);
                 }
 
@@ -222,20 +224,55 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
             LastTradesContainer trades = null;
             Console.Out.WriteLine("GetLastTrades");
 
+            Market _market = _markets.Find(c => c.PrimaryCurrency == market.PrimaryCurrency && c.SecondaryCurrency == market.SecondaryCurrency);
+            List<IScriptOrder> savedTrades = null;
             try
             {
-                JObject response = null;
-
-                if (response != null)
+                if (_trades.TryGetValue(_market.InstrumentId, out savedTrades))
                 {
+                    // Return the in memory saved trades
                     trades = new LastTradesContainer();
                     trades.Market = market;
-                    trades.Trades = response.Value<JArray>("result")
-                        .Select(c => Trade.ParsePublicTrade(market, c as JObject))
-                        .Cast<IScriptOrder>()
-                        .OrderByDescending(c => c.Timestamp)
-                        .ToList();
+                    trades.Trades = savedTrades;
+                } else
+                {
+                    bool subscribed;
+                    if (_instrumentSubscribed.TryGetValue(_market.InstrumentId, out subscribed)) {
+                        // Return the in memory saved trades
+                        if (_trades.TryGetValue(_market.InstrumentId, out savedTrades))
+                        {
+                            trades = new LastTradesContainer();
+                            trades.Market = market;
+                            trades.Trades = savedTrades;
+
+                            return trades;
+                        }
+
+                        return trades;
+                    }
+
+                    // Trades dont exist for that instrument so fetch them
+                    JArray response = (JArray)Call("SubscribeTrades", new ApexSubscribeTrades(1, _market.InstrumentId, 100));
+
+                    _instrumentSubscribed.Add(_market.InstrumentId, true);
+
+                    if (response != null)
+                    {
+                        trades = new LastTradesContainer();
+                        trades.Market = market;
+                        trades.Trades = response
+                            .Select(c => Trade.ParsePublicWebsocketTrade(market, c as JArray))
+                            .Cast<IScriptOrder>()
+                            .OrderByDescending(c => c.Timestamp)
+                            .ToList();
+
+                        _trades.Add(_market.InstrumentId, trades.Trades);
+                    } else
+                    {
+                      Console.Out.WriteLine("Null response in trades");
+                    }
                 }
+
             }
             catch (Exception e)
             {
@@ -250,7 +287,9 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
             Console.Out.WriteLine("GetAllLastTrades");
             return null;
         }
+        #endregion
 
+        #region Private API
         public Dictionary<string, decimal> GetWallet()
         {
             Dictionary<string, decimal> wallet = null;
@@ -357,6 +396,7 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
         public string PlaceOrder(IScriptMarket market, ScriptedOrderType direction, decimal price, decimal amount, bool isMarketOrder, string template = "", bool hiddenOrder = false)
         {
+            Console.Out.WriteLine("PlaceOrder1");
             var result = "";
 
             try
@@ -480,7 +520,9 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
             return order;
         }
+        #endregion
 
+        #region Helpers
         public decimal GetContractValue(IScriptMarket pair, decimal price)
         {
             return 1;
@@ -490,7 +532,6 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
         {
             return 1;
         }
-
 
         private void GetOrderDetailsFromTrades(IScriptMarket market, string orderId, decimal amount, Order order, List<IScriptOrder> trades)
         {
@@ -525,7 +566,9 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
             return totalVolume / trades.Sum(c => c.AmountFilled);
         }
+        #endregion
 
+        #region Events
         private void OnError(string exMessage)
         {
             if (Error != null)
@@ -585,7 +628,9 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
             if (PositionCorrection != null)
                 PositionCorrection(this, e);
         }
+        #endregion
 
+        #region Reset API functions
         private void SocketConnected(object sender, EventArgs e)
         {
             _wsOpened.Set();
@@ -616,18 +661,24 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                 }
             } else if (response.m == 3)
             {
-                switch (response.n)
+                if (response.n == "Level1UpdateEvent")
                 {
-                    case "Level1UpdateEvent":
-                        Console.Out.WriteLine("Level1UpdateEvent");
-                        Console.Out.WriteLine(JToken.Parse(e.Message));
-                        break;
-                    case "Level2UpdateEvent":
-                        OnOrderbookUpdate(new Orderbook(JArray.Parse(response.o)));
-                        break;
-                    default:
-                        Console.Out.WriteLine(e.Message);
-                        break;
+                    Console.Out.WriteLine(e.Message);
+                } else if(response.n == "Level2UpdateEvent")
+                {
+                    OnOrderbookUpdate(new Orderbook(JArray.Parse(response.o)));
+                } else if (response.n == "OrderTradeEvent")
+                {
+                    JObject tradeObject = JObject.Parse(response.o);
+                    Market _market = _markets.Find(c => c.InstrumentId == tradeObject.Value<int>("InstrumentId"));
+                    IScriptOrder trade = Trade.ParsePublicTrade(_market, tradeObject);
+                    if (_trades.ContainsKey(tradeObject.Value<int>("InstrumentId")))
+                    {
+                        _trades[tradeObject.Value<int>("InstrumentId")].Add(trade);
+                    }
+                } else
+                {
+                    Console.Out.WriteLine(response.n);
                 }
             } else if (response.m == 5)
             {
@@ -807,6 +858,7 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
             return bytes;
         }
     }
+    #endregion
 
     public class Product
     {
@@ -1031,7 +1083,7 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                 Market = market,
                 OrderId = o.Value<string>("OrderId"),
                 Price = o.Value<decimal>("Price"),
-                Amount = o.Value<decimal>("Quantity"),
+                Amount = o.Value<decimal>("OrigQuantity"),
                 AmountFilled = o.Value<decimal>("QuantityExecuted"),
 
                 Status = ScriptedOrderStatus.Executing
@@ -1044,12 +1096,12 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
             return r;
         }
 
-        public static Order ParseSingle(JObject o, List<Market> markets)
+        public static Order ParseSingle(JObject o)
         {
             if (o == null)
                 return null;
 
-            Order order = ParseOpenOrder(o, markets);
+            Order order = ParseOpenOrder(o, null);
 
             var status = o.Value<string>("OrderState").ToLower();
             if (status == "fullyexecuted")
@@ -1134,6 +1186,9 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
             if (product == null)
             {
                 o.FeeCurrency = "N/A";
+            } else
+            {
+                o.FeeCurrency = product.ProductName;
             }
 
             return o;
@@ -1144,15 +1199,36 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
             if (o == null)
                 return null;
 
-            var time = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var dtDateTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            dtDateTime = dtDateTime.AddMilliseconds(o.Value<long>("TradeTimeMS")).ToLocalTime();
 
             var r = new Trade()
             {
                 Market = market,
-                Timestamp = time.AddMilliseconds(o.Value<double>("time")),
-                Price = Decimal.Parse(o.Value<string>("price"), NumberStyles.Float, CultureInfo.InvariantCulture),
-                Amount = Decimal.Parse(o.Value<string>("quantity"), NumberStyles.Float, CultureInfo.InvariantCulture),
-                IsBuyOrder = o.Value<string>("side").ToLower() == "buy"
+                Timestamp = dtDateTime,
+                Price = o.Value<decimal>("Price"),
+                Amount = Decimal.Parse(o.Value<string>("Quantity"), NumberStyles.Float, CultureInfo.InvariantCulture),
+                IsBuyOrder = o.Value<string>("Side").ToLower().IndexOf("buy", StringComparison.Ordinal) > -1
+            };
+
+            return r;
+        }
+
+        public static Trade ParsePublicWebsocketTrade(IScriptMarket market, JArray o)
+        {
+            if (o == null)
+                return null;
+
+            var dtDateTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            dtDateTime = dtDateTime.AddMilliseconds(o.Value<long>(6)).ToLocalTime();
+
+            var r = new Trade()
+            {
+                Market = market,
+                Timestamp = dtDateTime,
+                Price = o.Value<decimal>(3),
+                Amount = o.Value<decimal>(2),
+                IsBuyOrder = o.Value<int>(8) == 0
             };
 
             return r;
@@ -1421,6 +1497,32 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
         {
             this.AccountId = o.Value<int>("AccountId");
         }
+    }
+
+    public class ApexSubscribeTrades
+    {
+      public int OMSId { get; set; }
+      public int InstrumentId { get; set; }
+      public int IncludeLastCount { get; set; }
+
+      public ApexSubscribeTrades(int OMSId, int InstrumentId, int IncludeLastCount)
+      {
+        this.OMSId = OMSId;
+        this.InstrumentId = InstrumentId;
+        this.IncludeLastCount = IncludeLastCount;
+      }
+    }
+
+    public class ApexUnsubscribeTrades
+    {
+      public int OMSId { get; set; }
+      public int InstrumentId { get; set; }
+
+      public ApexUnsubscribeTrades(int OMSId, int InstrumentId)
+      {
+        this.OMSId = OMSId;
+        this.InstrumentId = InstrumentId;
+      }
     }
 
     public class ApexOrderHistory
