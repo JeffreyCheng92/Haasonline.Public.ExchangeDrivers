@@ -31,11 +31,11 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
         private int _i = 0;
         private List<Market> _markets;
         private List<Product> _products;
-        private List<IScriptOrder> _openOrders;
         private ApexUserInfo _userInfo;
-        private List<ApexOrderHistory> _orders = new List<ApexOrderHistory>();
         private Dictionary<int, List<IScriptOrder>> _trades = new Dictionary<int, List<IScriptOrder>>();
         private Dictionary<int, bool> _instrumentSubscribed = new Dictionary<int, bool>();
+        private Dictionary<int, List<IScriptTick>> _tickers = new Dictionary<int, List<IScriptTick>>();
+        private Dictionary<int, bool> _instrumentTickerSubscribed = new Dictionary<int, bool>();
 
         private long _lastNonce;
         private readonly string _apiUrl = "https://api.metalx.com";
@@ -181,7 +181,67 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
         public List<IScriptTick> GetAllTickers()
         {
             Console.Out.WriteLine("GetAllTickers");
-            return null;
+            List<IScriptTick> tickers = null;
+            List<IScriptTick> newTickers = null;
+
+            try
+            {
+                JArray response = null;
+                List<IScriptTick> savedTickers = null;
+                foreach (Market market in _markets)
+                {
+                    if (_tickers.TryGetValue(market.InstrumentId, out savedTickers))
+                    {
+                        // Return the in memory saved tickers
+                        // Dont do anything
+                    } else
+                    {
+                        bool subscribed;
+                        if (_instrumentTickerSubscribed.TryGetValue(market.InstrumentId, out subscribed))
+                        {
+                            // Return the in memory saved tickers
+                            // Dont do anything
+                        } else
+                        {
+                            response = (JArray)Call("SubscribeTicker", new ApexSubscribeTicker(1, market.InstrumentId, 30, 100));
+                            _instrumentTickerSubscribed.Add(market.InstrumentId, true);
+
+                            if (response != null)
+                            {
+                                newTickers = response
+                                    .Select(c => new Ticker(c as JObject, market.PrimaryCurrency, market.SecondaryCurrency))
+                                    .Cast<IScriptTick>()
+                                    .ToList();
+
+                                _tickers.Add(market.InstrumentId, newTickers);
+                            } else
+                            {
+                                Console.Out.WriteLine("Null response in tickers");
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Console.Out.WriteLine(e);
+                // OnError(e.message);
+            }
+
+            // Remap all ticker dictionary into array of ticker
+            foreach(KeyValuePair<int, List<IScriptTick>> entry in _tickers)
+            {
+                if (tickers == null)
+                {
+                    tickers = entry.Value;
+                } else
+                {
+                    tickers = tickers.Concat(entry.Value)
+                        .ToList();
+                }
+            }
+
+            return tickers;
         }
 
         public IScriptOrderbook GetOrderbook(IScriptMarket market)
@@ -226,9 +286,10 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
             Market _market = _markets.Find(c => c.PrimaryCurrency == market.PrimaryCurrency && c.SecondaryCurrency == market.SecondaryCurrency);
             List<IScriptOrder> savedTrades = null;
+            bool subscribed;
             try
             {
-                if (_trades.TryGetValue(_market.InstrumentId, out savedTrades))
+                if (_trades.TryGetValue(_market.InstrumentId, out savedTrades) || _instrumentSubscribed.TryGetValue(_market.InstrumentId, out subscribed))
                 {
                     // Return the in memory saved trades
                     trades = new LastTradesContainer();
@@ -236,20 +297,19 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                     trades.Trades = savedTrades;
                 } else
                 {
-                    bool subscribed;
-                    if (_instrumentSubscribed.TryGetValue(_market.InstrumentId, out subscribed)) {
-                        // Return the in memory saved trades
-                        if (_trades.TryGetValue(_market.InstrumentId, out savedTrades))
-                        {
-                            trades = new LastTradesContainer();
-                            trades.Market = market;
-                            trades.Trades = savedTrades;
-
-                            return trades;
-                        }
-
-                        return trades;
-                    }
+                    // if (_instrumentSubscribed.TryGetValue(_market.InstrumentId, out subscribed)) {
+                    //     // Return the in memory saved trades
+                    //     if (_trades.TryGetValue(_market.InstrumentId, out savedTrades))
+                    //     {
+                    //         trades = new LastTradesContainer();
+                    //         trades.Market = market;
+                    //         trades.Trades = savedTrades;
+                    //
+                    //         return trades;
+                    //     }
+                    //
+                    //     return trades;
+                    // }
 
                     // Trades dont exist for that instrument so fetch them
                     JArray response = (JArray)Call("SubscribeTrades", new ApexSubscribeTrades(1, _market.InstrumentId, 100));
@@ -358,8 +418,6 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                 OnError(e.Message);
             }
 
-            _openOrders = orders;
-
             return orders;
         }
 
@@ -404,8 +462,13 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                 Market instrument = _markets.Find(c => c.PrimaryCurrency == market.PrimaryCurrency && c.SecondaryCurrency == market.SecondaryCurrency);
                 int side = (direction == ScriptedOrderType.Buy) ? 0 : 1;
                 int type = (isMarketOrder) ? ApexOrderType.Market : ApexOrderType.Limit;
+                string priceString = price.ToString();
+                if (type == 1)
+                {
+                  priceString = null;
+                }
 
-                JObject response = (JObject)Call("SendOrder", new ApexSendOrder(instrument.InstrumentId, 1, _userInfo.AccountId, side, amount.ToString(), type, price.ToString()));
+                JObject response = (JObject)Call("SendOrder", new ApexSendOrder(instrument.InstrumentId, 1, _userInfo.AccountId, side, amount.ToString(), type, priceString));
 
                 result = response.Value<string>("OrderId");
             } catch (Exception e)
@@ -447,32 +510,12 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
             Console.Out.WriteLine("GetOrderStatus");
             try {
-              // TODO: Reimplement this once APEX UI is updated to 3.4.1
-              // JObject response = (JObject)Call("GetOrderStatus", new ApexOrderStatus(1, _userInfo.AccountId, int.Parse(orderId)));
-              //
-              // Console.Out.WriteLine(response);
-              // if (response != null && response.Value<bool>("success"))
-              // {
-              //   status = Order.ParseSingle(response.Value<JObject>("result")).Status;
-              // }
+                JObject response = (JObject)Call("GetOrderStatus", new ApexOrderStatus(1, _userInfo.AccountId, int.Parse(orderId)));
 
-              ApexOrderHistory order = _orders.Find(o => o.OrderId == int.Parse(orderId));
-              if (order != null) {
-                  status = order.Status;
-              } else {
-                  JArray orderHistoryResponse = (JArray)Call("GetOrdersHistory", new ApexGetAllOrderHistory(1, _userInfo.AccountId));
-
-                  if (orderHistoryResponse != null)
-                  {
-                      _orders = orderHistoryResponse.Select(item => ApexOrderHistory.ParseSingle(item as JObject))
-                        .ToList();
-                  }
-
-                  order = _orders.Find(o => o.OrderId == int.Parse(orderId));
-
-                  if (order != null)
-                      status = order.Status;
-              }
+                if (response != null)
+                {
+                    status = Order.ParseStatus(response);
+                }
             } catch (Exception e)
             {
                 Console.Out.WriteLine("Error inside GetOrderStatus");
@@ -498,8 +541,6 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                     order.Status = status;
                     return order;
                 }
-
-                Thread.Sleep(500);
 
                 var history = GetTradeHistory();
                 if (history == null)
@@ -765,14 +806,6 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                 _authenticated = true;
                 _userInfo = new ApexUserInfo(response.Value<JObject>("User"));
                 Call("SubscribeAccountEvents", new ApexSubscribeAccountEvents(1, _userInfo.AccountId));
-
-                JArray orderHistoryResponse = (JArray)Call("GetOrdersHistory", new ApexGetAllOrderHistory(1, _userInfo.AccountId));
-
-                if (response != null)
-                {
-                    _orders = orderHistoryResponse.Select(item => ApexOrderHistory.ParseSingle(item as JObject))
-                      .ToList();
-                }
             } else
             {
                 throw new Exception("Failed to authenticate");
@@ -984,9 +1017,10 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
         public Ticker(JObject o, string primairy = "", string secondairy = "")
         {
-            var close = o.Value<string>("SessionClose");
-            var buyPrice = o.Value<string>("BestOffer");
-            var sellPrice = o.Value<string>("BestBid");
+            Console.Out.WriteLine(o);
+            var close = o.Value<string>("sessionClose");
+            var buyPrice = o.Value<string>("bestOffer");
+            var sellPrice = o.Value<string>("bestBid");
 
             Market = new Market(primairy, secondairy);
 
@@ -1123,6 +1157,34 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
                 order.Status = ScriptedOrderStatus.Unkown;
 
             return order;
+        }
+
+        public static ScriptedOrderStatus ParseStatus(JObject o)
+        {
+            if (o == null)
+            {
+                return ScriptedOrderStatus.Unkown;
+            }
+
+            var status = o.Value<string>("OrderState").ToLower();
+
+            if (status == "fullyexecuted")
+                return ScriptedOrderStatus.Completed;
+
+            else if (status == "working")
+                return ScriptedOrderStatus.Executing;
+
+            else if (status == "rejected")
+                return ScriptedOrderStatus.Cancelled;
+
+            else if (status == "canceled")
+                return ScriptedOrderStatus.Cancelled;
+
+            else if (status == "expired")
+                return ScriptedOrderStatus.Cancelled;
+
+            else
+                return ScriptedOrderStatus.Unkown;
         }
     }
 
@@ -1360,18 +1422,6 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
         }
     }
 
-    public class ApexGetAllOrderHistory
-    {
-      public int OMSId { get; set; }
-      public int AccountId { get; set; }
-
-      public ApexGetAllOrderHistory(int OMSId, int AccountId)
-      {
-        this.OMSId = OMSId;
-        this.AccountId = AccountId;
-      }
-    }
-
     public class ApexGetAccountPositions
     {
         public int OMSId { get; set; }
@@ -1506,69 +1556,43 @@ namespace Haasonline.Public.ExchangeDriver.Bittrex
 
     public class ApexSubscribeTrades
     {
-      public int OMSId { get; set; }
-      public int InstrumentId { get; set; }
-      public int IncludeLastCount { get; set; }
+        public int OMSId { get; set; }
+        public int InstrumentId { get; set; }
+        public int IncludeLastCount { get; set; }
 
-      public ApexSubscribeTrades(int OMSId, int InstrumentId, int IncludeLastCount)
-      {
-        this.OMSId = OMSId;
-        this.InstrumentId = InstrumentId;
-        this.IncludeLastCount = IncludeLastCount;
-      }
+        public ApexSubscribeTrades(int OMSId, int InstrumentId, int IncludeLastCount)
+        {
+            this.OMSId = OMSId;
+            this.InstrumentId = InstrumentId;
+            this.IncludeLastCount = IncludeLastCount;
+        }
     }
 
     public class ApexUnsubscribeTrades
     {
-      public int OMSId { get; set; }
-      public int InstrumentId { get; set; }
+        public int OMSId { get; set; }
+        public int InstrumentId { get; set; }
 
-      public ApexUnsubscribeTrades(int OMSId, int InstrumentId)
-      {
-        this.OMSId = OMSId;
-        this.InstrumentId = InstrumentId;
-      }
+        public ApexUnsubscribeTrades(int OMSId, int InstrumentId)
+        {
+            this.OMSId = OMSId;
+            this.InstrumentId = InstrumentId;
+        }
     }
 
-    public class ApexOrderHistory
+    public class ApexSubscribeTicker
     {
-        public int OrderId { get; set; }
-        public decimal Quantity { get; set; }
-        public ScriptedOrderStatus Status { get; set; }
+        public int OMSId { get; set; }
+        public int InstrumentId { get; set; }
+        public int Interval { get; set; }
+        public int IncludeLastCount { get; set; }
 
-        public ApexOrderHistory(JObject o)
+        public ApexSubscribeTicker(int OMSId, int InstrumentId, int Interval, int IncludeLastCount)
         {
-            this.OrderId = o.Value<int>("OrderId");
-            this.Quantity = o.Value<decimal>("OrigQuantity");
-        }
-
-        public static ApexOrderHistory ParseSingle(JObject o)
-        {
-            if (o == null)
-                return null;
-
-            var orderHistory = new ApexOrderHistory(o);
-            var status = o.Value<string>("OrderState").ToLower();
-
-            if (status == "fullyexecuted")
-                orderHistory.Status = ScriptedOrderStatus.Completed;
-
-            else if (status == "working")
-                orderHistory.Status = ScriptedOrderStatus.Executing;
-
-            else if (status == "rejected")
-                orderHistory.Status = ScriptedOrderStatus.Cancelled;
-
-            else if (status == "canceled")
-                orderHistory.Status = ScriptedOrderStatus.Cancelled;
-
-            else if (status == "expired")
-                orderHistory.Status = ScriptedOrderStatus.Cancelled;
-
-            else
-                orderHistory.Status = ScriptedOrderStatus.Unkown;
-
-            return orderHistory;
+            this.OMSId = OMSId;
+            this.InstrumentId = InstrumentId;
+            this.Interval = Interval;
+            this.IncludeLastCount = IncludeLastCount;
         }
     }
 }
